@@ -1,0 +1,5 @@
+python-telegram-bot==20.0
+apscheduler==3.10.0
+pytz==2023.3
+python-dotenv==1.0.0
+sqlite3==0.0.0
