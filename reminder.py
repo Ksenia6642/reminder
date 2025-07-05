@@ -787,7 +787,6 @@ class ReminderBot:
             logger.info("Бот запущен")
             await self.application.start()
             async with self.application:
-                await asyncio.sleep(5)  # перед start_polling
                 await self.application.updater.start_polling()
                 while True:
                     await asyncio.sleep(3600)
@@ -813,6 +812,9 @@ class ReminderBot:
             except Exception as e:
                 logger.error(f"Ошибка при остановке: {e}")
         
+        if hasattr(self, 'scheduler') and self.scheduler.running:
+            self.scheduler.shutdown()
+
         logger.info("Бот успешно остановлен")
 
     async def ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
