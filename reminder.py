@@ -16,6 +16,7 @@ from telegram import (
     PhotoSize,
     Document
 )
+from telegram import Bot
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -764,39 +765,46 @@ class ReminderBot:
             )
 
     async def run(self):
-        """Запускает бота с правильным управлением жизненным циклом"""
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not token:
-            raise ValueError("Не указан TELEGRAM_BOT_TOKEN в переменных окружения")
-
-        # Создаем и инициализируем приложение
-        self.application = Application.builder().token(token).build()
-        await self.application.initialize()  # Явная инициализация
-
-        # Настройка обработчиков
+        # 1. Убиваем предыдущие соединения
+        await self._kill_previous_sessions()
+        
+        # 2. Инициализация
+        self.application = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+        await self.application.initialize()
+        
+        # 3. Настройка обработчиков
         self.setup_handlers()
-
-        # Загружаем напоминания
-        await self.load_all_reminders()
-
-        # Запускаем планировщик
-        self.scheduler.start()
-
+        
+        # 4. Запуск с защитой от конфликтов
         try:
-            # Запускаем polling
-            logger.info("Бот запущен")
             await self.application.start()
-            async with self.application:
-                await self.application.updater.start_polling()
-                while True:
-                    await asyncio.sleep(3600)
-
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("Получен сигнал завершения...")
-        except Exception as e:
-            logger.error(f"Ошибка в основном цикле: {e}")
+            await self.application.updater.start_polling(
+                drop_pending_updates=True,  # Важно!
+                timeout=10,
+                connect_timeout=5
+            )
+            logger.info("Бот успешно запущен")
+            
+            # Бесконечный цикл с обработкой остановки
+            while True:
+                await asyncio.sleep(3600)
+                
+        except asyncio.CancelledError:
+            logger.info("Получен сигнал остановки")
         finally:
             await self.shutdown()
+
+    async def _kill_previous_sessions(self):
+        """Принудительно закрывает все предыдущие соединения"""
+        
+        temp_bot = Bot(os.getenv("TELEGRAM_BOT_TOKEN"))
+        try:
+            await temp_bot.close()
+            await temp_bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logger.warning(f"Очистка сессий: {e}")
+        finally:
+            await temp_bot.shutdown()
 
     async def shutdown(self):
         logger.info("Остановка бота...")
