@@ -764,6 +764,27 @@ class ReminderBot:
                 reply_markup=self.main_menu_keyboard
             )
 
+    async def restart_bot(self):
+        """Полный перезапуск бота"""
+        logger.info("Инициирован перезапуск бота")
+        
+        try:
+            # 1. Корректно останавливаем текущий экземпляр
+            await self.shutdown()
+            
+            # 2. Очищаем состояние (опционально)
+            if hasattr(self, 'application'):
+                del self.application
+                
+            # 3. Создаем новый экземпляр
+            new_bot = ReminderBot()
+            await new_bot.run()
+            
+        except Exception as e:
+            logger.critical(f"Ошибка при перезапуске: {e}")
+            # Экстренный выход для системных демонов (supervisor/systemd)
+            os._exit(1)
+
     async def run(self):
         # 1. Убиваем предыдущие соединения
         await self._kill_previous_sessions()
@@ -788,7 +809,11 @@ class ReminderBot:
             # Бесконечный цикл с обработкой остановки
             while True:
                 await asyncio.sleep(3600)
-                
+        except telegram.error.Conflict as e:
+            logger.error(f"Обнаружен конфликт: {e}, перезапуск через 5 секунд...")
+            await asyncio.sleep(5)
+            await self.restart_bot()
+
         except asyncio.CancelledError:
             logger.info("Получен сигнал остановки")
         finally:
