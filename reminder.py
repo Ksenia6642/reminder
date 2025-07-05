@@ -786,11 +786,10 @@ class ReminderBot:
             # Запускаем polling
             logger.info("Бот запущен")
             await self.application.start()
-            await self.application.updater.start_polling()
-
-            # Бесконечный цикл
-            while True:
-                await asyncio.sleep(3600)  # Проверка каждые 60 минут
+            async with self.application:
+                await self.application.updater.start_polling()
+                while True:
+                    await asyncio.sleep(3600)
 
         except (KeyboardInterrupt, SystemExit):
             logger.info("Получен сигнал завершения...")
@@ -800,30 +799,19 @@ class ReminderBot:
             await self.shutdown()
 
     async def shutdown(self):
-        """Корректное завершение работы бота"""
         logger.info("Остановка бота...")
-
-        # Останавливаем планировщик
+        
         if hasattr(self, 'scheduler') and self.scheduler.running:
             self.scheduler.shutdown()
-
-        # Останавливаем приложение
+        
         if hasattr(self, 'application'):
-            # Если используется Updater (для polling)
-            if hasattr(self.application, 'updater') and self.application.updater.running:
-                await self.application.updater.stop()
-
-            # Останавливаем само приложение
-            if self.application.running:
-                await self.application.stop()
-
-            # Вызываем shutdown если он доступен
             try:
                 if self.application.running:
+                    await self.application.stop()
                     await self.application.shutdown()
             except Exception as e:
-                logger.error(f"Ошибка при shutdown: {e}")
-
+                logger.error(f"Ошибка при остановке: {e}")
+        
         logger.info("Бот успешно остановлен")
 
     async def ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
