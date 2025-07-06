@@ -151,6 +151,12 @@ class ReminderBot:
         context.user_data['batch_frequency'] = frequency
         context.user_data['batch_frequency_text'] = frequency_map[frequency]
         
+        # Удаляем предыдущее сообщение с клавиатурой
+        try:
+            await query.message.delete()
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение: {e}")
+        
         # Создаем все напоминания
         user_id = query.from_user.id
         created_count = 0
@@ -181,15 +187,12 @@ class ReminderBot:
             await self.schedule_reminder(user_id, reminder_data)
             created_count += 1
         
-        await query.edit_message_text(
-            f"✅ Успешно создано {created_count} напоминаний с периодичностью {frequency_map[frequency]}!\n\n"
-            "Теперь вы можете отредактировать любое из них, добавив комментарий.",
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Успешно создано {created_count} напоминаний с периодичностью {frequency_map[frequency]}!\n\n"
+                "Теперь вы можете отредактировать любое из них, добавив комментарий.",
             reply_markup=self.main_menu_keyboard
         )
-        
-        # Сохраняем список созданных ID для возможного редактирования
-        context.user_data['created_job_ids'] = [f"rem_{user_id}_{datetime.now().timestamp()}_{i}" 
-                                            for i in range(created_count)]
         
         context.user_data.clear()
         return ConversationHandler.END
@@ -613,13 +616,17 @@ class ReminderBot:
         context.user_data['reminder']['frequency'] = frequency
         context.user_data['reminder']['frequency_text'] = frequency_map[frequency]
         
-        await query.edit_message_text(
-            f"Периодичность: {frequency_map[frequency]}\n\n"
-            "Вы можете прикрепить комментарий (текст, фото или файл) или нажмите 'Пропустить'."
-        )
+        # Удаляем предыдущее сообщение с клавиатурой
+        try:
+            await query.message.delete()
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение: {e}")
+        
+        # Отправляем новое сообщение без клавиатуры
         await context.bot.send_message(
             chat_id=query.from_user.id,
-            text="Ожидание комментария...",
+            text=f"Периодичность: {frequency_map[frequency]}\n\n"
+                "Вы можете прикрепить комментарий (текст, фото или файл) или нажмите 'Пропустить'.",
             reply_markup=self.skip_keyboard
         )
         return SETTING_REMINDER_COMMENT
@@ -950,9 +957,11 @@ class ReminderBot:
             [InlineKeyboardButton("Нью-Йорк (EST)", callback_data='America/New_York')]
         ]
 
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
             "Выберите ваш часовой пояс:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=reply_markup
         )
 
     async def handle_timezone_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1247,8 +1256,8 @@ class ReminderBot:
 
     def _setup_handlers(self):
         """Настройка всех обработчиков команд и сообщений"""
-        # ConversationHandler для создания напоминаний
-        conv_handler = ConversationHandler(
+        # ConversationHandler для создания одиночного напоминания
+        single_reminder_conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler('add', self.add_reminder_command),
                 MessageHandler(filters.Regex(r'^➕ Добавить напоминание$'), self.start_reminder_creation)
@@ -1261,7 +1270,8 @@ class ReminderBot:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_reminder_time)
                 ],
                 SETTING_REMINDER_FREQUENCY: [
-                    CallbackQueryHandler(self.set_reminder_frequency)
+                    CallbackQueryHandler(self.set_reminder_frequency, 
+                                    pattern='^(once|daily|weekly|weekdays|mon_wed_fri|tue_thu)$')
                 ],
                 SETTING_REMINDER_COMMENT: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_reminder_comment),
@@ -1273,11 +1283,12 @@ class ReminderBot:
             fallbacks=[
                 CommandHandler('cancel', self.cancel_conversation),
                 MessageHandler(filters.Regex(r'^🔙 Отмена$'), self.cancel_conversation)
-            ]
+            ],
+            allow_reentry=True
         )
 
         # ConversationHandler для массового добавления напоминаний
-        batch_conv_handler = ConversationHandler(
+        batch_reminders_conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler('batch', self.start_batch_reminders),
                 MessageHandler(filters.Regex(r'^📝 Добавить несколько$'), self.start_batch_reminders)
@@ -1287,17 +1298,19 @@ class ReminderBot:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.parse_batch_reminders)
                 ],
                 SETTING_BATCH_FREQUENCY: [
-                    CallbackQueryHandler(self.set_batch_frequency)
+                    CallbackQueryHandler(self.set_batch_frequency,
+                                    pattern='^(daily|weekly|weekdays|mon_wed_fri|tue_thu)$')
                 ]
             },
             fallbacks=[
                 CommandHandler('cancel', self.cancel_conversation),
                 MessageHandler(filters.Regex(r'^🔙 Отмена$'), self.cancel_conversation)
-            ]
+            ],
+            allow_reentry=True
         )
 
         # ConversationHandler для редактирования напоминаний
-        edit_conv_handler = ConversationHandler(
+        edit_reminder_conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler('edit', self.start_edit_reminder),
                 MessageHandler(filters.Regex(r'^✏️ Редактировать$'), self.start_edit_reminder)
@@ -1316,10 +1329,11 @@ class ReminderBot:
             fallbacks=[
                 CommandHandler('cancel', self.cancel_conversation),
                 MessageHandler(filters.Regex(r'^🔙 Отмена$'), self.cancel_conversation)
-            ]
+            ],
+            allow_reentry=True
         )
 
-        # Регистрация всех обработчиков
+        # Регистрация всех обработчиков команд
         self.application.add_handler(CommandHandler('start', self.start_command))
         self.application.add_handler(CommandHandler('help', self.help_command))
         self.application.add_handler(CommandHandler('status', self.status_command))
@@ -1327,13 +1341,32 @@ class ReminderBot:
         self.application.add_handler(CommandHandler('delete', self.delete_reminder_command))
         self.application.add_handler(CommandHandler('timezone', self.timezone_command))
         self.application.add_handler(CommandHandler('test', self.test_command))
-        self.application.add_handler(conv_handler)
-        self.application.add_handler(batch_conv_handler)
-        self.application.add_handler(edit_conv_handler)
-        self.application.add_handler(MessageHandler(filters.TEXT, self.handle_main_menu))
-        self.application.add_handler(CallbackQueryHandler(self.handle_timezone_selection))
+        self.application.add_handler(CommandHandler('ping', self.ping))
+
+        # Регистрация ConversationHandler
+        self.application.add_handler(single_reminder_conv_handler)
+        self.application.add_handler(batch_reminders_conv_handler)
+        self.application.add_handler(edit_reminder_conv_handler)
+
+        # Обработчики сообщений
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_main_menu))
         self.application.add_handler(MessageHandler(filters.Regex(r'^❌ Удалить '), self.delete_reminder))
+
+        # Обработчики CallbackQuery
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_timezone_selection,
+            pattern='^(Europe/.+|America/.+)$'
+        ))
+
+        # Обработчик ошибок
         self.application.add_error_handler(self.error_handler)
+
+        # Фильтр для обработки только текстовых сообщений, не являющихся командами
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^❌ Удалить '),
+            self.handle_text_message
+        ))
+        
         
 if __name__ == '__main__':
     # Создание и запуск бота
