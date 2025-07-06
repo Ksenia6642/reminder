@@ -234,45 +234,30 @@ class ReminderBot:
         return result
 
     async def load_all_reminders(self):
-        """Загружает все напоминания из базы данных при запуске бота"""
+        """Загрузка с проверкой состояния"""
+        if not self.scheduler.running:
+            self.scheduler.start(paused=True)  # Временный старт для добавления задач
+            
         connection = sqlite3.connect('reminders.db')
         cursor = connection.cursor()
-
         cursor.execute('SELECT * FROM reminders')
-        all_reminders = cursor.fetchall()
-        connection.close()
-
-        for reminder in all_reminders:
-            user_id = reminder[0]
-            job_id = reminder[1]
-            text = reminder[2]
-            time_str = reminder[3]
-            frequency = reminder[4]
-            freq_text = reminder[5]
-            comment_type = reminder[6]
-            comment_text = reminder[7]
-            comment_file_id = reminder[8]
-            comment_file_name = reminder[9]
-
-            comment = None
-            if comment_type:
-                comment = {
-                    'type': comment_type,
-                    'content': comment_text,
-                    'file_id': comment_file_id,
-                    'file_name': comment_file_name
-                }
-
-            reminder_data = {
-                'job_id': job_id,
-                'text': text,
-                'time': time_str,
-                'frequency': frequency,
-                'frequency_text': freq_text,
-                'comment': comment
-            }
-
-            await self.schedule_reminder(user_id, reminder_data)
+        
+        for reminder in cursor.fetchall():
+            try:
+                # ... ваш существующий код ...
+                self.scheduler.add_job(
+                    self.send_reminder,
+                    trigger=trigger,
+                    args=[user_id, job_id],
+                    id=job_id,
+                    replace_existing=True,
+                    misfire_grace_time=60  # Добавьте это
+                )
+            except Exception as e:
+                logger.error(f"Failed to load reminder {job_id}: {str(e)}")
+        
+        if self.scheduler.state == 1:  # STATE_PAUSED
+            self.scheduler.resume()
 
     # Основные обработчики команд
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -786,38 +771,43 @@ class ReminderBot:
             os._exit(1)
 
     async def run(self):
-        # 1. Убиваем предыдущие соединения
-        await self._kill_previous_sessions()
-        
-        # 2. Инициализация
-        self.application = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-        await self.application.initialize()
-        
-        # 3. Настройка обработчиков
-        self.setup_handlers()
-        
-        # 4. Запуск с защитой от конфликтов
+        """Новая версия с правильной инициализацией"""
         try:
-            await self.application.start()
-            await self.application.updater.start_polling(
-                drop_pending_updates=True,  # Важно!
-                timeout=10,
-                connect_timeout=5
-            )
-            logger.info("Бот успешно запущен")
+            # 1. Инициализация приложения
+            self.application = Application.builder() \
+                .token(os.getenv("TELEGRAM_BOT_TOKEN")) \
+                .post_init(self._post_init) \
+                .build()
             
-            # Бесконечный цикл с обработкой остановки
+            # 2. Загрузка напоминаний ДО старта планировщика
+            await self.load_all_reminders()
+            
+            # 3. Явный старт планировщика
+            self.scheduler.start(paused=False)
+            logger.info(f"Scheduler started with {len(self.scheduler.get_jobs())} jobs")
+            
+            # 4. Запуск бота
+            await self.application.initialize()
+            await self.application.start()
+            await self.application.updater.start_polling(drop_pending_updates=True)
+            
+            # 5. Вечный цикл с обработкой остановки
             while True:
-                await asyncio.sleep(3600)
-        except telegram.error.Conflict as e:
-            logger.error(f"Обнаружен конфликт: {e}, перезапуск через 5 секунд...")
-            await asyncio.sleep(5)
-            await self.restart_bot()
-
-        except asyncio.CancelledError:
-            logger.info("Получен сигнал остановки")
+                await asyncio.sleep(10)
+                if not self.scheduler.running:
+                    logger.error("Scheduler stopped unexpectedly!")
+                    self.scheduler.start(paused=False)
+                    
+        except Exception as e:
+            logger.critical(f"Fatal error: {str(e)}", exc_info=True)
         finally:
             await self.shutdown()
+
+    async def _post_init(self, app: Application):
+        """Дополнительная инициализация после запуска"""
+        logger.info("Bot post-init checks")
+        if not self.scheduler.running:
+            self.scheduler.start(paused=False)
 
     async def _kill_previous_sessions(self):
         """Принудительно закрывает все предыдущие соединения"""

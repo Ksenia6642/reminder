@@ -1,1 +1,1 @@
-worker: python reminder.py
+worker: python reminder.py --wait-for-db
