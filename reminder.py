@@ -193,48 +193,115 @@ class ReminderBot:
         if self.scheduler.state == 1:  # STATE_PAUSED
             self.scheduler.resume()
 
-    # Основные обработчики команд
+    
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         user = update.effective_user
         timezone = await self.get_user_timezone(user.id)
-
+        
         await update.message.reply_text(
             f"Привет, {user.first_name}!\n"
             f"Я бот для управления напоминаниями.\n"
             f"Текущий часовой пояс: {timezone}\n\n"
-            "Выберите действие в меню:",
+            "Используйте меню ниже или команды:\n"
+            "/add - создать напоминание\n"
+            "/list - список напоминаний\n"
+            "/help - помощь",
+            reply_markup=self.main_menu_keyboard
+        )
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /help"""
+        help_text = """
+    📚 <b>Справка по командам бота</b>:
+
+    <b>Основные команды:</b>
+    /start - Начало работы
+    /help - Эта справка
+    /status - Проверить состояние бота
+
+    <b>Работа с напоминаниями:</b>
+    /add - Создать новое напоминание
+    /list - Показать все напоминания
+    /delete [ID] - Удалить напоминание
+
+    <b>Настройки:</b>
+    /timezone - Изменить часовой пояс
+    /test - Отправить тестовое напоминание
+
+    ℹ Для создания напоминаний также можно использовать кнопки меню.
+    """
+        await update.message.reply_text(help_text, parse_mode='HTML')
+
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /status"""
+        status_lines = [
+            "🔄 <b>Статус бота</b>",
+            f"• Состояние: {'работает ✅' if self._is_running else 'остановлен ❌'}",
+            f"• Напоминаний в базе: {self._count_reminders()}",
+            f"• Активных задач: {len(self.scheduler.get_jobs()) if hasattr(self, 'scheduler') else 0}",
+            f"• Часовой пояс: {await self.get_user_timezone(update.effective_user.id)}"
+        ]
+        await update.message.reply_text("\n".join(status_lines), parse_mode='HTML')
+
+    def _count_reminders(self) -> int:
+        """Подсчет количества напоминаний в базе"""
+        try:
+            conn = sqlite3.connect('reminders.db')
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM reminders')
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count
+        except:
+            return 0
+
+    async def list_reminders(self, update: Update):
+        """Показать список всех напоминаний"""
+        user = update.effective_user
+        reminders = await self.get_user_reminders(user.id)
+        
+        if not reminders:
+            await update.message.reply_text(
+                "У вас пока нет напоминаний.",
+                reply_markup=self.main_menu_keyboard
+            )
+            return
+        
+        message = ["📋 <b>Ваши напоминания</b>:\n"]
+        for i, reminder in enumerate(reminders, 1):
+            message.append(
+                f"{i}. {reminder['text']}\n"
+                f"   ⏰ {reminder['time']} ({reminder['frequency_text']})\n"
+                f"   🆔 {reminder['job_id']}\n"
+            )
+        
+        await update.message.reply_text(
+            "\n".join(message),
+            parse_mode='HTML',
             reply_markup=self.main_menu_keyboard
         )
 
     async def handle_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик главного меню"""
         text = update.message.text
-
+        
         if text == "➕ Добавить напоминание":
-            await update.message.reply_text(
-                "Введите текст напоминания:",
-                reply_markup=self.cancel_keyboard
-            )
-            return SETTING_REMINDER_TEXT
-
+            return await self.start_reminder_creation(update, context)
         elif text == "📋 Список напоминаний":
-            return await self.show_reminders_list(update)
-
+            return await self.list_reminders(update)
         elif text == "❌ Удалить напоминание":
             return await self.show_delete_menu(update)
-
         elif text == "🌍 Изменить часовой пояс":
             return await self.show_timezone_menu(update)
-
         elif text == "🔄 Тест напоминания":
             return await self.send_test_reminder(update)
-
         else:
             await update.message.reply_text(
-                "Неизвестная команда. Используйте кнопки меню.",
+                "Неизвестная команда. Используйте кнопки меню или /help",
                 reply_markup=self.main_menu_keyboard
             )
+    
 
     async def start_reminder_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Начало процесса создания напоминания"""
@@ -502,74 +569,74 @@ class ReminderBot:
         except Exception as e:
             logger.error(f"Ошибка планирования напоминания: {e}")
         
-        async def send_reminder(self, user_id: int, job_id: str):
-            """Отправляет напоминание пользователю"""
-            try:
-                # Получаем напоминание из базы данных
-                connection = sqlite3.connect('reminders.db')
-                cursor = connection.cursor()
+    async def send_reminder(self, user_id: int, job_id: str):
+        """Отправляет напоминание пользователю"""
+        try:
+            # Получаем напоминание из базы данных
+            connection = sqlite3.connect('reminders.db')
+            cursor = connection.cursor()
 
-                cursor.execute(
-                    'SELECT * FROM reminders WHERE job_id = ?',
-                    (job_id,)
-                )
-                reminder = cursor.fetchone()
-                connection.close()
+            cursor.execute(
+                'SELECT * FROM reminders WHERE job_id = ?',
+                (job_id,)
+            )
+            reminder = cursor.fetchone()
+            connection.close()
 
-                if not reminder:
-                    logger.error(f"Напоминание {job_id} не найдено в базе данных")
-                    return
+            if not reminder:
+                logger.error(f"Напоминание {job_id} не найдено в базе данных")
+                return
 
-                _, _, text, time_str, frequency, freq_text, comment_type, comment_text, comment_file_id, comment_file_name, _ = reminder
+            _, _, text, time_str, frequency, freq_text, comment_type, comment_text, comment_file_id, comment_file_name, _ = reminder
 
-                # Формируем сообщение
-                timezone = pytz.timezone(await self.get_user_timezone(user_id))
-                current_time = datetime.now(timezone).strftime('%H:%M %Z')
-                message = f"⏰ Напоминание: {text}\n🕒 Ваше время: {current_time}"
+            # Формируем сообщение
+            timezone = pytz.timezone(await self.get_user_timezone(user_id))
+            current_time = datetime.now(timezone).strftime('%H:%M %Z')
+            message = f"⏰ Напоминание: {text}\n🕒 Ваше время: {current_time}"
 
-                # Отправляем сообщение в зависимости от типа комментария
-                if comment_type:
-                    comment = {
-                        'type': comment_type,
-                        'content': comment_text,
-                        'file_id': comment_file_id,
-                        'file_name': comment_file_name
-                    }
+            # Отправляем сообщение в зависимости от типа комментария
+            if comment_type:
+                comment = {
+                    'type': comment_type,
+                    'content': comment_text,
+                    'file_id': comment_file_id,
+                    'file_name': comment_file_name
+                }
 
-                    if comment['type'] == 'text':
-                        await self.application.bot.send_message(
-                            chat_id=user_id,
-                            text=f"{message}\n\n💬 Комментарий: {comment['content']}"
-                        )
-                    elif comment['type'] == 'photo':
-                        await self.application.bot.send_photo(
-                            chat_id=user_id,
-                            photo=comment['file_id'],
-                            caption=message + (f"\n\n💬 {comment['content']}" if comment['content'] else "")
-                        )
-                    elif comment['type'] == 'document':
-                        await self.application.bot.send_document(
-                            chat_id=user_id,
-                            document=comment['file_id'],
-                            caption=message + (f"\n\n💬 {comment['content']}" if comment['content'] else "")
-                        )
-                else:
+                if comment['type'] == 'text':
                     await self.application.bot.send_message(
                         chat_id=user_id,
-                        text=message
+                        text=f"{message}\n\n💬 Комментарий: {comment['content']}"
                     )
+                elif comment['type'] == 'photo':
+                    await self.application.bot.send_photo(
+                        chat_id=user_id,
+                        photo=comment['file_id'],
+                        caption=message + (f"\n\n💬 {comment['content']}" if comment['content'] else "")
+                    )
+                elif comment['type'] == 'document':
+                    await self.application.bot.send_document(
+                        chat_id=user_id,
+                        document=comment['file_id'],
+                        caption=message + (f"\n\n💬 {comment['content']}" if comment['content'] else "")
+                    )
+            else:
+                await self.application.bot.send_message(
+                    chat_id=user_id,
+                    text=message
+                )
 
-                # Если напоминание одноразовое - удаляем его
-                if frequency == 'once':
-                    await self.delete_reminder_from_database(job_id)
-
-                logger.info(f"Напоминание {job_id} отправлено пользователю {user_id}")
-
-            except telegram.error.Forbidden:
-                logger.error(f"Пользователь {user_id} заблокировал бота")
+            # Если напоминание одноразовое - удаляем его
+            if frequency == 'once':
                 await self.delete_reminder_from_database(job_id)
-            except Exception as error:
-                logger.error(f"Ошибка при отправке напоминания {job_id}: {error}")
+
+            logger.info(f"Напоминание {job_id} отправлено пользователю {user_id}")
+
+        except telegram.error.Forbidden:
+            logger.error(f"Пользователь {user_id} заблокировал бота")
+            await self.delete_reminder_from_database(job_id)
+        except Exception as error:
+            logger.error(f"Ошибка при отправке напоминания {job_id}: {error}")
 
     async def show_reminders_list(self, update: Update):
         """Показывает список всех напоминаний пользователя"""
@@ -623,19 +690,19 @@ class ReminderBot:
         )
 
     async def delete_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Удаляет выбранное напоминание"""
+        """Удалить выбранное напоминание"""
         user = update.effective_user
         job_id = update.message.text.replace("❌ Удалить ", "").strip()
-
-        # Удаляем из базы данных
+        
+        # Удаление из базы данных
         await self.delete_reminder_from_database(job_id)
-
-        # Удаляем из планировщика
+        
+        # Удаление из планировщика
         try:
             self.scheduler.remove_job(job_id)
         except:
             pass
-
+        
         await update.message.reply_text(
             f"Напоминание {job_id} успешно удалено.",
             reply_markup=self.main_menu_keyboard
@@ -719,26 +786,6 @@ class ReminderBot:
                 reply_markup=self.main_menu_keyboard
             )
 
-    async def restart_bot(self):
-        """Полный перезапуск бота"""
-        logger.info("Инициирован перезапуск бота")
-        
-        try:
-            # 1. Корректно останавливаем текущий экземпляр
-            await self.shutdown()
-            
-            # 2. Очищаем состояние (опционально)
-            if hasattr(self, 'application'):
-                del self.application
-                
-            # 3. Создаем новый экземпляр
-            new_bot = ReminderBot()
-            await new_bot.run()
-            
-        except Exception as e:
-            logger.critical(f"Ошибка при перезапуске: {e}")
-            # Экстренный выход для системных демонов (supervisor/systemd)
-            os._exit(1)
 
     async def _load_reminders_from_database(self):
         """Загрузка всех напоминаний из базы данных"""
@@ -912,11 +959,87 @@ class ReminderBot:
         """Обработчик команды для проверки активности бота"""
         await update.message.reply_text("🟢 Бот активен")
 
+    async def get_user_reminders(self, user_id: int) -> List[Dict]:
+        """Получает все напоминания пользователя из базы данных"""
+        connection = sqlite3.connect('reminders.db')
+        cursor = connection.cursor()
+
+        cursor.execute(
+            'SELECT job_id, reminder_text, reminder_time, frequency, frequency_text FROM reminders WHERE user_id = ?',
+            (user_id,)
+        )
+        
+        reminders = []
+        for row in cursor.fetchall():
+            job_id, text, time_str, frequency, freq_text = row
+            reminders.append({
+                'job_id': job_id,
+                'text': text,
+                'time': time_str,
+                'frequency': frequency,
+                'frequency_text': freq_text
+            })
+        
+        connection.close()
+        return reminders
+
+    async def delete_reminder_from_database(self, job_id: str):
+        """Удаляет напоминание из базы данных"""
+        connection = sqlite3.connect('reminders.db')
+        cursor = connection.cursor()
+
+        cursor.execute(
+            'DELETE FROM reminders WHERE job_id = ?',
+            (job_id,)
+        )
+        
+        connection.commit()
+        connection.close()
+
+    async def add_reminder_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /add для создания напоминания"""
+        return await self.start_reminder_creation(update, context)
+
+    async def list_reminders_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /list для показа списка напоминаний"""
+        await self.list_reminders(update)
+
+    async def delete_reminder_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /delete для удаления напоминания"""
+        if not context.args:
+            await update.message.reply_text(
+                "Пожалуйста, укажите ID напоминания. Например: /delete rem_123456789",
+                reply_markup=self.main_menu_keyboard
+            )
+            return
+        
+        job_id = context.args[0]
+        await self.delete_reminder_from_database(job_id)
+        
+        try:
+            self.scheduler.remove_job(job_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить задачу из планировщика: {e}")
+        
+        await update.message.reply_text(
+            f"Напоминание {job_id} успешно удалено.",
+            reply_markup=self.main_menu_keyboard
+        )
+
+    async def timezone_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /timezone для изменения часового пояса"""
+        await self.show_timezone_menu(update)
+
+    async def test_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /test для тестового напоминания"""
+        await self.send_test_reminder(update)
+
     def _setup_handlers(self):
         """Настройка всех обработчиков команд и сообщений"""
         # ConversationHandler для создания напоминаний
         conv_handler = ConversationHandler(
             entry_points=[
+                CommandHandler('add', self.add_reminder_command),
                 MessageHandler(filters.Regex(r'^➕ Добавить напоминание$'), self.start_reminder_creation)
             ],
             states={
@@ -944,14 +1067,17 @@ class ReminderBot:
 
         # Регистрация всех обработчиков
         self.application.add_handler(CommandHandler('start', self.start_command))
+        self.application.add_handler(CommandHandler('help', self.help_command))
+        self.application.add_handler(CommandHandler('status', self.status_command))
+        self.application.add_handler(CommandHandler('list', self.list_reminders_command))
+        self.application.add_handler(CommandHandler('delete', self.delete_reminder_command))
+        self.application.add_handler(CommandHandler('timezone', self.timezone_command))
+        self.application.add_handler(CommandHandler('test', self.test_command))
         self.application.add_handler(conv_handler)
         self.application.add_handler(MessageHandler(filters.TEXT, self.handle_main_menu))
         self.application.add_handler(CallbackQueryHandler(self.handle_timezone_selection))
         self.application.add_handler(MessageHandler(filters.Regex(r'^❌ Удалить '), self.delete_reminder))
-        self.application.add_handler(CommandHandler('help', self.help_command))
-        self.application.add_handler(CommandHandler('status', self.status_command))
         self.application.add_error_handler(self.error_handler)
-
 
 if __name__ == '__main__':
     # Создание и запуск бота
