@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
     SETTING_BATCH_REMINDERS,
     SETTING_BATCH_FREQUENCY,
     EDITING_REMINDER
-) = range(4, 7)
+) = range(7)  # Теперь у нас 7 состояний
 
 # Часовой пояс по умолчанию
 DEFAULT_TIMEZONE = 'Europe/Moscow'
@@ -810,7 +810,7 @@ class ReminderBot:
             cursor = connection.cursor()
 
             cursor.execute(
-                'SELECT * FROM reminders WHERE job_id = ?',
+                'SELECT reminder_text, reminder_time, frequency, comment_type, comment_text, comment_file_id FROM reminders WHERE job_id = ?',
                 (job_id,)
             )
             reminder = cursor.fetchone()
@@ -820,7 +820,7 @@ class ReminderBot:
                 logger.error(f"Напоминание {job_id} не найдено в базе данных")
                 return
 
-            _, _, text, time_str, frequency, freq_text, comment_type, comment_text, comment_file_id, comment_file_name, _ = reminder
+            text, time_str, frequency, comment_type, comment_text, comment_file_id = reminder
 
             # Формируем сообщение
             timezone = pytz.timezone(await self.get_user_timezone(user_id))
@@ -832,8 +832,7 @@ class ReminderBot:
                 comment = {
                     'type': comment_type,
                     'content': comment_text,
-                    'file_id': comment_file_id,
-                    'file_name': comment_file_name
+                    'file_id': comment_file_id
                 }
 
                 if comment['type'] == 'text':
@@ -1027,47 +1026,28 @@ class ReminderBot:
         try:
             conn = sqlite3.connect('reminders.db')
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM reminders')
+            cursor.execute('SELECT user_id, job_id, reminder_text, reminder_time, frequency FROM reminders')
             reminders = cursor.fetchall()
             
             loaded_count = 0
             
             for reminder in reminders:
                 try:
-                    user_id = reminder[0]
-                    job_id = reminder[1]
-                    text = reminder[2]
-                    time_str = reminder[3]
-                    frequency = reminder[4]
-                    freq_text = reminder[5]
-                    comment_type = reminder[6]
-                    comment_text = reminder[7]
-                    comment_file_id = reminder[8]
-                    comment_file_name = reminder[9]
+                    user_id, job_id, text, time_str, frequency = reminder
                     
-                    # Восстановление объекта комментария
-                    comment = None
-                    if comment_type:
-                        comment = {
-                            'type': comment_type,
-                            'content': comment_text,
-                            'file_id': comment_file_id,
-                            'file_name': comment_file_name
-                        }
+                    # Восстановление объекта комментария не требуется при загрузке
                     
                     # Создание триггера для напоминания
                     hour, minute = map(int, time_str.split(':'))
                     timezone = pytz.timezone(await self.get_user_timezone(user_id))
                     
                     if frequency == 'once':
-                        # Одноразовое напоминание
                         now = datetime.now(timezone)
-                        reminder_time = timezone.localize(datetime.combine(now.date(), time(hour, minute)))
+                        reminder_time = timezone.localize(datetime.combine(now.date(), time(hour, minute))
                         if reminder_time < now:
                             reminder_time += timedelta(days=1)
                         trigger = DateTrigger(reminder_time)
                     else:
-                        # Повторяющееся напоминание
                         frequency_map = {
                             'daily': '*',
                             'weekly': 'sun-sat',
