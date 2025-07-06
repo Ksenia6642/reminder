@@ -493,7 +493,7 @@ class ReminderBot:
             return 0
 
     async def list_reminders(self, update: Update):
-        """Показать список всех напоминаний"""
+        """Показывает список всех напоминаний пользователя с информацией о комментариях"""
         user = update.effective_user
         reminders = await self.get_user_reminders(user.id)
         
@@ -506,10 +506,26 @@ class ReminderBot:
         
         message = ["📋 <b>Ваши напоминания</b>:\n"]
         for i, reminder in enumerate(reminders, 1):
+            # Получаем информацию о комментарии
+            comment_info = ""
+            if reminder.get('comment_type'):
+                if reminder['comment_type'] == 'text':
+                    comment_text = reminder.get('comment_text', '')[:20] + "..." if len(reminder.get('comment_text', '')) > 20 else reminder.get('comment_text', '')
+                    comment_info = f" | 💬: {comment_text}"
+                elif reminder['comment_type'] == 'photo':
+                    comment_info = " | 📷 Фото"
+                    if reminder.get('comment_text'):
+                        comment_info += f" ({reminder['comment_text'][:20]}...)"
+                elif reminder['comment_type'] == 'document':
+                    doc_name = reminder.get('comment_file_name', 'документ')
+                    comment_info = f" | 📄 {doc_name}"
+                    if reminder.get('comment_text'):
+                        comment_info += f" ({reminder['comment_text'][:20]}...)"
+            
             message.append(
-                f"{i}. {reminder['text']}\n"
-                f"   ⏰ {reminder['time']} ({reminder['frequency_text']})\n"
-                f"   🆔 {reminder['job_id']}\n"
+                f"{i}. <b>{reminder['text']}</b>\n"
+                f"   ⏰ {reminder['time']} ({reminder['frequency_text']}){comment_info}\n"
+                f"   🆔 <code>{reminder['job_id']}</code>\n"
             )
         
         await update.message.reply_text(
@@ -1180,24 +1196,36 @@ class ReminderBot:
         await update.message.reply_text("🟢 Бот активен")
 
     async def get_user_reminders(self, user_id: int) -> List[Dict]:
-        """Получает все напоминания пользователя из базы данных"""
+        """Получает все напоминания пользователя из базы данных с информацией о комментариях"""
         connection = sqlite3.connect('reminders.db')
         cursor = connection.cursor()
 
         cursor.execute(
-            'SELECT job_id, reminder_text, reminder_time, frequency, frequency_text FROM reminders WHERE user_id = ?',
+            '''SELECT 
+                job_id, 
+                reminder_text, 
+                reminder_time, 
+                frequency, 
+                frequency_text,
+                comment_type,
+                comment_text,
+                comment_file_name
+            FROM reminders 
+            WHERE user_id = ?''',
             (user_id,)
         )
         
         reminders = []
         for row in cursor.fetchall():
-            job_id, text, time_str, frequency, freq_text = row
             reminders.append({
-                'job_id': job_id,
-                'text': text,
-                'time': time_str,
-                'frequency': frequency,
-                'frequency_text': freq_text
+                'job_id': row[0],
+                'text': row[1],
+                'time': row[2],
+                'frequency': row[3],
+                'frequency_text': row[4],
+                'comment_type': row[5],
+                'comment_text': row[6],
+                'comment_file_name': row[7]
             })
         
         connection.close()
