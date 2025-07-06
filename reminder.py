@@ -543,17 +543,16 @@ class ReminderBot:
         elif text == "📋 Список напоминаний":
             return await self.list_reminders(update)
         elif text == "❌ Удалить напоминание":
-            return await self.show_delete_menu(update)
+            return await self.show_delete_menu(update, context)
         elif text == "🌍 Изменить часовой пояс":
             return await self.show_timezone_menu(update)
         elif text == "🔄 Тест напоминания":
             return await self.send_test_reminder(update)
         else:
             await update.message.reply_text(
-                "Неизвестная команда. Используйте кнопки меню или /help",
+                "Пожалуйста, используйте кнопки меню или команды из /help",
                 reply_markup=self.main_menu_keyboard
             )
-    
 
     async def start_reminder_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Начало процесса создания напоминания"""
@@ -919,30 +918,64 @@ class ReminderBot:
             reply_markup=self.main_menu_keyboard
         )
 
-    async def show_delete_menu(self, update: Update):
+    async def show_delete_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает меню для удаления напоминаний"""
         user = update.effective_user
         reminders = await self.get_user_reminders(user.id)
-
+        
         if not reminders:
             await update.message.reply_text(
                 "У вас нет активных напоминаний.",
                 reply_markup=self.main_menu_keyboard
             )
             return
-
+        
+        # Создаем клавиатуру с кнопками удаления
         keyboard = []
         for reminder in reminders:
-            keyboard.append(
-                [KeyboardButton(f"❌ Удалить {reminder['job_id']}")]
-            )
-
-        keyboard.append([KeyboardButton("🔙 Назад")])
-
+            btn_text = f"{reminder['time']} - {reminder['text'][:20]}..."
+            keyboard.append([InlineKeyboardButton(
+                f"❌ {btn_text}", 
+                callback_data=f"delete_{reminder['job_id']}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="delete_cancel")])
+        
         await update.message.reply_text(
             "Выберите напоминание для удаления:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+    async def handle_delete_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает выбор напоминания для удаления"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "delete_cancel":
+            await query.message.delete()
+            await query.message.reply_text(
+                "Удаление отменено.",
+                reply_markup=self.main_menu_keyboard
+            )
+            return
+        
+        if query.data.startswith("delete_"):
+            job_id = query.data[7:]  # Убираем префикс "delete_"
+            
+            # Удаляем из базы данных
+            await self.delete_reminder_from_database(job_id)
+            
+            # Удаляем из планировщика
+            try:
+                self.scheduler.remove_job(job_id)
+            except Exception as e:
+                logger.warning(f"Не удалось удалить задачу из планировщика: {e}")
+            
+            await query.message.delete()
+            await query.message.reply_text(
+                f"Напоминание успешно удалено! (ID: {job_id})",
+                reply_markup=self.main_menu_keyboard
+            )
 
     async def delete_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Удалить выбранное напоминание"""
@@ -1409,6 +1442,11 @@ class ReminderBot:
 
         # Обработчик ошибок
         self.application.add_error_handler(self.error_handler)
+
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_delete_reminder,
+            pattern=r'^delete_.*'
+        ))
             
             
 if __name__ == '__main__':
