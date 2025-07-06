@@ -240,6 +240,85 @@ class ReminderBot:
         )
         return SETTING_REMINDER_COMMENT
 
+    async def reschedule_reminder(self, job_id: str):
+        """Перепланирует напоминание с новыми параметрами"""
+        reminder = await self.get_reminder_by_id(job_id)
+        if not reminder:
+            return
+        
+        user_id = int(job_id.split('_')[1])  # Извлекаем user_id из job_id
+        
+        # Удаляем старую задачу
+        try:
+            self.scheduler.remove_job(job_id)
+        except:
+            pass
+        
+        # Создаем новую задачу
+        reminder_data = {
+            'job_id': job_id,
+            'text': reminder['text'],
+            'time': reminder['time'],
+            'frequency': reminder['frequency'],
+            'frequency_text': reminder['frequency_text'],
+            'comment': {
+                'type': reminder['comment_type'],
+                'content': reminder['comment_text'],
+                'file_id': None,
+                'file_name': reminder['comment_file_name']
+            } if reminder['comment_type'] else None
+        }
+        
+        await self.schedule_reminder(user_id, reminder_data)
+
+    async def update_reminder_field(self, update: Update, context: ContextTypes.DEFAULT_TYPE, field: str, new_value: any):
+        """Обновляет указанное поле напоминания"""
+        job_id = context.user_data['editing_job_id']
+        
+        connection = sqlite3.connect('reminders.db')
+        cursor = connection.cursor()
+        
+        if field == 'text':
+            cursor.execute(
+                'UPDATE reminders SET reminder_text = ? WHERE job_id = ?',
+                (new_value, job_id)
+            )
+        elif field == 'time':
+            cursor.execute(
+                'UPDATE reminders SET reminder_time = ? WHERE job_id = ?',
+                (new_value, job_id)
+            )
+        elif field == 'frequency':
+            cursor.execute(
+                'UPDATE reminders SET frequency = ?, frequency_text = ? WHERE job_id = ?',
+                (new_value['frequency'], new_value['frequency_text'], job_id)
+            )
+        elif field == 'comment':
+            cursor.execute(
+                '''
+                UPDATE reminders SET 
+                    comment_type = ?,
+                    comment_text = ?,
+                    comment_file_id = ?,
+                    comment_file_name = ?
+                WHERE job_id = ?
+                ''',
+                (
+                    new_value['type'] if new_value else None,
+                    new_value.get('content') if new_value else None,
+                    new_value.get('file_id') if new_value else None,
+                    new_value.get('file_name') if new_value else None,
+                    job_id
+                )
+            )
+        
+        connection.commit()
+        connection.close()
+        
+        # Обновляем задачу в планировщике
+        if field in ['time', 'frequency']:
+            await self.reschedule_reminder(job_id)
+
     async def update_reminder_comment(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Обновление комментария для существующего напоминания"""
         user = update.effective_user
@@ -1141,6 +1220,179 @@ class ReminderBot:
             conn.close()
 
 
+    async def show_edit_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает меню для выбора напоминания для редактирования"""
+        user = update.effective_user
+        reminders = await self.get_user_reminders(user.id)
+        
+        if not reminders:
+            await update.message.reply_text(
+                "У вас нет напоминаний для редактирования.",
+                reply_markup=self.main_menu_keyboard
+            )
+            return
+        
+        # Создаем клавиатуру с кнопками редактирования
+        keyboard = []
+        for reminder in reminders:
+            btn_text = f"{reminder['time']} - {reminder['text'][:20]}..."
+            keyboard.append([InlineKeyboardButton(
+                f"✏️ {btn_text}", 
+                callback_data=f"edit_{reminder['job_id']}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_cancel")])
+        
+        await update.message.reply_text(
+            "Выберите напоминание для редактирования:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def handle_edit_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает выбор напоминания для редактирования"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "edit_cancel":
+            await query.message.delete()
+            await query.message.reply_text(
+                "Редактирование отменено.",
+                reply_markup=self.main_menu_keyboard
+            )
+            return
+        
+        if query.data.startswith("edit_"):
+            job_id = query.data[5:]  # Убираем префикс "edit_"
+            
+            # Получаем данные напоминания
+            reminder = await self.get_reminder_by_id(job_id)
+            
+            if not reminder:
+                await query.message.reply_text(
+                    "Напоминание не найдено!",
+                    reply_markup=self.main_menu_keyboard
+                )
+                return
+            
+            # Сохраняем ID редактируемого напоминания
+            context.user_data['editing_job_id'] = job_id
+            
+            # Показываем меню выбора поля для редактирования
+            keyboard = [
+                [InlineKeyboardButton("✏️ Текст", callback_data=f"editfield_text_{job_id}")],
+                [InlineKeyboardButton("⏰ Время", callback_data=f"editfield_time_{job_id}")],
+                [InlineKeyboardButton("🔄 Периодичность", callback_data=f"editfield_freq_{job_id}")],
+                [InlineKeyboardButton("💬 Комментарий", callback_data=f"editfield_comment_{job_id}")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="editfield_cancel")]
+            ]
+            
+            await query.message.edit_text(
+                f"Выберите что редактировать в напоминании:\n\n"
+                f"📝 {reminder['text']}\n"
+                f"⏰ {reminder['time']} ({reminder['frequency_text']})\n"
+                f"💬 {self._format_comment(reminder)}",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+
+    async def get_reminder_by_id(self, job_id: str) -> Optional[Dict]:
+        """Получает напоминание по его ID"""
+        connection = sqlite3.connect('reminders.db')
+        cursor = connection.cursor()
+        
+        cursor.execute(
+            '''SELECT 
+                job_id, 
+                reminder_text, 
+                reminder_time, 
+                frequency, 
+                frequency_text,
+                comment_type,
+                comment_text,
+                comment_file_name
+            FROM reminders 
+            WHERE job_id = ?''',
+            (job_id,)
+        )
+        
+        row = cursor.fetchone()
+        connection.close()
+        
+        if not row:
+            return None
+        
+        return {
+            'job_id': row[0],
+            'text': row[1],
+            'time': row[2],
+            'frequency': row[3],
+            'frequency_text': row[4],
+            'comment_type': row[5],
+            'comment_text': row[6],
+            'comment_file_name': row[7]
+        }
+
+    async def handle_edit_field_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает выбор поля для редактирования"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "editfield_cancel":
+            await query.message.delete()
+            await self.show_edit_menu(query.message, context)
+            return
+        
+        if query.data.startswith("editfield_"):
+            parts = query.data.split('_')
+            field = parts[1]
+            job_id = parts[2]
+            
+            context.user_data['editing_field'] = field
+            context.user_data['editing_job_id'] = job_id
+            
+            if field == "text":
+                await query.message.edit_text(
+                    "Введите новый текст напоминания:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Назад", callback_data="edit_back")]
+                    ])
+                )
+                return SETTING_REMINDER_TEXT
+            
+            elif field == "time":
+                await query.message.edit_text(
+                    "Введите новое время в формате ЧЧ:ММ:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Назад", callback_data="edit_back")]
+                    ])
+                )
+                return SETTING_REMINDER_TIME
+            
+            elif field == "freq":
+                keyboard = [
+                    [InlineKeyboardButton("Ежедневно", callback_data='daily')],
+                    [InlineKeyboardButton("Еженедельно", callback_data='weekly')],
+                    [InlineKeyboardButton("По будням (Пн-Пт)", callback_data='weekdays')],
+                    [InlineKeyboardButton("Пн, Ср, Пт", callback_data='mon_wed_fri')],
+                    [InlineKeyboardButton("Вт, Чт", callback_data='tue_thu')],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="edit_back")]
+                ]
+                await query.message.edit_text(
+                    "Выберите новую периодичность:",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return SETTING_REMINDER_FREQUENCY
+            
+            elif field == "comment":
+                await query.message.edit_text(
+                    "Отправьте новый комментарий (текст, фото или файл):",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ Удалить комментарий", callback_data="comment_delete")],
+                        [InlineKeyboardButton("🔙 Назад", callback_data="edit_back")]
+                    ])
+                )
+                return SETTING_REMINDER_COMMENT
+
     async def run(self):
         """Основной метод запуска бота"""
         if self._is_running:
@@ -1446,6 +1698,16 @@ class ReminderBot:
         self.application.add_handler(CallbackQueryHandler(
             self.handle_delete_reminder,
             pattern=r'^delete_.*'
+        ))
+
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_edit_choice,
+            pattern=r'^edit_.*'
+        ))
+        
+        self.application.add_handler(CallbackQueryHandler(
+            self.handle_edit_field_choice,
+            pattern=r'^editfield_.*'
         ))
             
             
