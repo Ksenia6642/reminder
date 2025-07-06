@@ -100,7 +100,7 @@ class ReminderBot:
                 if not line.strip():
                     continue
                 time_part, *text_parts = line.strip().split()
-                time.strptime(time_part, "%H:%M")  # Проверка формата времени
+                datetime.strptime(time_part, "%H:%M")  # Проверка формата времени
                 text = ' '.join(text_parts)
                 reminders.append({'time': time_part, 'text': text})
             
