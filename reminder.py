@@ -1254,6 +1254,27 @@ class ReminderBot:
         """Обработчик команды /test для тестового напоминания"""
         await self.send_test_reminder(update)
 
+    async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик для текстовых сообщений, не попавших в другие обработчики"""
+        text = update.message.text
+        
+        if text.startswith('❌ Удалить '):
+            # Этот случай уже обрабатывается другим обработчиком
+            return
+        
+        # Проверяем, возможно пользователь начал диалог, но не завершил его
+        if 'reminder' in context.user_data:
+            await update.message.reply_text(
+                "Кажется, вы начали создание напоминания. Пожалуйста, завершите его или отмените.",
+                reply_markup=self.cancel_keyboard
+            )
+            return
+        
+        await update.message.reply_text(
+            "Я не понимаю эту команду. Пожалуйста, используйте кнопки меню или команды из /help",
+            reply_markup=self.main_menu_keyboard
+        )
+
     def _setup_handlers(self):
         """Настройка всех обработчиков команд и сообщений"""
         # ConversationHandler для создания одиночного напоминания
@@ -1360,14 +1381,8 @@ class ReminderBot:
 
         # Обработчик ошибок
         self.application.add_error_handler(self.error_handler)
-
-        # Фильтр для обработки только текстовых сообщений, не являющихся командами
-        self.application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^❌ Удалить '),
-            self.handle_text_message
-        ))
-        
-        
+            
+            
 if __name__ == '__main__':
     # Создание и запуск бота
     bot = ReminderBot()
