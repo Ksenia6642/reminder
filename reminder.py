@@ -40,8 +40,11 @@ logger = logging.getLogger(__name__)
     SETTING_REMINDER_TEXT,
     SETTING_REMINDER_TIME,
     SETTING_REMINDER_FREQUENCY,
-    SETTING_REMINDER_COMMENT
-) = range(4)
+    SETTING_REMINDER_COMMENT,
+    SETTING_BATCH_REMINDERS,
+    SETTING_BATCH_FREQUENCY,
+    EDITING_REMINDER
+) = range(4, 7)
 
 # Часовой пояс по умолчанию
 DEFAULT_TIMEZONE = 'Europe/Moscow'
@@ -70,6 +73,235 @@ class ReminderBot:
         
         # Проверка и создание базы данных
         self._initialize_database()
+
+    async def start_batch_reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Начало процесса добавления нескольких напоминаний"""
+        await update.message.reply_text(
+            "Отправьте список напоминаний в формате:\n"
+            "ЧЧ:ММ Текст напоминания\n"
+            "ЧЧ:ММ Текст напоминания\n\n"
+            "Пример:\n"
+            "05:00 Подъем\n"
+            "06:00 Зарядка\n"
+            "07:00 Английский",
+            reply_markup=self.cancel_keyboard
+        )
+        return SETTING_BATCH_REMINDERS
+
+    async def parse_batch_reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Парсинг списка напоминаний"""
+        if update.message.text == "🔙 Отмена":
+            await self.cancel_conversation(update, context)
+            return ConversationHandler.END
+        
+        try:
+            reminders = []
+            for line in update.message.text.split('\n'):
+                if not line.strip():
+                    continue
+                time_part, *text_parts = line.strip().split()
+                time.strptime(time_part, "%H:%M")  # Проверка формата времени
+                text = ' '.join(text_parts)
+                reminders.append({'time': time_part, 'text': text})
+            
+            if not reminders:
+                raise ValueError("Не найдено ни одного напоминания")
+            
+            context.user_data['batch_reminders'] = reminders
+            
+            # Клавиатура выбора периодичности
+            keyboard = [
+                [InlineKeyboardButton("Ежедневно", callback_data='daily')],
+                [InlineKeyboardButton("Еженедельно", callback_data='weekly')],
+                [InlineKeyboardButton("По будням (Пн-Пт)", callback_data='weekdays')],
+                [InlineKeyboardButton("Пн, Ср, Пт", callback_data='mon_wed_fri')],
+                [InlineKeyboardButton("Вт, Чт", callback_data='tue_thu')]
+            ]
+            
+            await update.message.reply_text(
+                "Выберите периодичность для всех напоминаний:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return SETTING_BATCH_FREQUENCY
+            
+        except ValueError as e:
+            await update.message.reply_text(
+                f"Ошибка в формате: {str(e)}\n\n"
+                "Пожалуйста, отправьте список в правильном формате:\n"
+                "ЧЧ:ММ Текст напоминания\n"
+                "ЧЧ:ММ Текст напоминания",
+                reply_markup=self.cancel_keyboard
+            )
+            return SETTING_BATCH_REMINDERS
+
+    async def set_batch_frequency(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Установка периодичности для группы напоминаний"""
+        query = update.callback_query
+        await query.answer()
+        
+        frequency_map = {
+            'daily': "Ежедневно",
+            'weekly': "Еженедельно",
+            'weekdays': "По будням (Пн-Пт)",
+            'mon_wed_fri': "Пн, Ср, Пт",
+            'tue_thu': "Вт, Чт"
+        }
+        
+        frequency = query.data
+        context.user_data['batch_frequency'] = frequency
+        context.user_data['batch_frequency_text'] = frequency_map[frequency]
+        
+        # Создаем все напоминания
+        user_id = query.from_user.id
+        created_count = 0
+        
+        for reminder in context.user_data['batch_reminders']:
+            job_id = f"rem_{user_id}_{datetime.now().timestamp()}_{created_count}"
+            
+            # Сохраняем в базу данных
+            await self.save_reminder_to_database(
+                user_id=user_id,
+                job_id=job_id,
+                reminder_text=reminder['text'],
+                reminder_time=reminder['time'],
+                frequency=frequency,
+                frequency_text=frequency_map[frequency],
+                comment=None
+            )
+            
+            # Планируем напоминание
+            reminder_data = {
+                'job_id': job_id,
+                'text': reminder['text'],
+                'time': reminder['time'],
+                'frequency': frequency,
+                'frequency_text': frequency_map[frequency],
+                'comment': None
+            }
+            await self.schedule_reminder(user_id, reminder_data)
+            created_count += 1
+        
+        await query.edit_message_text(
+            f"✅ Успешно создано {created_count} напоминаний с периодичностью {frequency_map[frequency]}!\n\n"
+            "Теперь вы можете отредактировать любое из них, добавив комментарий.",
+            reply_markup=self.main_menu_keyboard
+        )
+        
+        # Сохраняем список созданных ID для возможного редактирования
+        context.user_data['created_job_ids'] = [f"rem_{user_id}_{datetime.now().timestamp()}_{i}" 
+                                            for i in range(created_count)]
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    async def start_edit_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Начало процесса редактирования напоминания"""
+        await update.message.reply_text(
+            "Введите ID напоминания, которое хотите отредактировать.\n"
+            "Вы можете посмотреть ID через /list",
+            reply_markup=self.cancel_keyboard
+        )
+        return EDITING_REMINDER
+
+    async def edit_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Редактирование существующего напоминания"""
+        if update.message.text == "🔙 Отмена":
+            await self.cancel_conversation(update, context)
+            return ConversationHandler.END
+        
+        job_id = update.message.text.strip()
+        user_id = update.message.from_user.id
+        
+        # Проверяем, существует ли такое напоминание у пользователя
+        connection = sqlite3.connect('reminders.db')
+        cursor = connection.cursor()
+        cursor.execute(
+            'SELECT 1 FROM reminders WHERE user_id = ? AND job_id = ?',
+            (user_id, job_id)
+        )
+        exists = cursor.fetchone()
+        connection.close()
+        
+        if not exists:
+            await update.message.reply_text(
+                "Напоминание с таким ID не найдено. Пожалуйста, проверьте ID и попробуйте еще раз.",
+                reply_markup=self.cancel_keyboard
+            )
+            return EDITING_REMINDER
+        
+        context.user_data['editing_job_id'] = job_id
+        
+        await update.message.reply_text(
+            "Отправьте новый комментарий для напоминания (текст, фото или файл):",
+            reply_markup=self.skip_keyboard
+        )
+        return SETTING_REMINDER_COMMENT
+
+    async def update_reminder_comment(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Обновление комментария для существующего напоминания"""
+        user = update.effective_user
+        job_id = context.user_data['editing_job_id']
+        
+        if update.message.text == "🔙 Отмена":
+            await self.cancel_conversation(update, context)
+            return ConversationHandler.END
+        
+        # Обработка вложений
+        comment = None
+        if update.message.text != "Пропустить":
+            if update.message.photo:
+                photo = update.message.photo[-1]
+                comment = {
+                    'type': 'photo',
+                    'file_id': photo.file_id,
+                    'caption': update.message.caption
+                }
+            elif update.message.document:
+                document = update.message.document
+                comment = {
+                    'type': 'document',
+                    'file_id': document.file_id,
+                    'file_name': document.file_name,
+                    'caption': update.message.caption
+                }
+            else:
+                comment = {
+                    'type': 'text',
+                    'content': update.message.text
+                }
+        
+        # Обновление в базе данных
+        connection = sqlite3.connect('reminders.db')
+        cursor = connection.cursor()
+        
+        cursor.execute(
+            '''
+            UPDATE reminders SET
+                comment_type = ?,
+                comment_text = ?,
+                comment_file_id = ?,
+                comment_file_name = ?
+            WHERE job_id = ?
+            ''',
+            (
+                comment['type'] if comment else None,
+                comment.get('content') if comment else None,
+                comment.get('file_id') if comment else None,
+                comment.get('file_name') if comment else None,
+                job_id
+            )
+        )
+        
+        connection.commit()
+        connection.close()
+        
+        await update.message.reply_text(
+            "✅ Напоминание успешно обновлено!",
+            reply_markup=self.main_menu_keyboard
+        )
+        
+        context.user_data.clear()
+        return ConversationHandler.END
 
     # Методы работы с базой данных
     async def get_user_timezone(self, user_id: int) -> str:
@@ -144,13 +376,14 @@ class ReminderBot:
         """Инициализация всех клавиатур бота"""
         # Основное меню
         self.main_menu_keyboard = ReplyKeyboardMarkup(
-            [
-                [KeyboardButton("➕ Добавить напоминание")],
-                [KeyboardButton("📋 Список напоминаний"), KeyboardButton("❌ Удалить напоминание")],
-                [KeyboardButton("🌍 Изменить часовой пояс"), KeyboardButton("🔄 Тест напоминания")]
-            ],
-            resize_keyboard=True
-        )
+        [
+            [KeyboardButton("➕ Добавить напоминание"), KeyboardButton("📝 Добавить несколько")],
+            [KeyboardButton("📋 Список напоминаний"), KeyboardButton("❌ Удалить напоминание")],
+            [KeyboardButton("✏️ Редактировать"), KeyboardButton("🌍 Изменить часовой пояс")],
+            [KeyboardButton("🔄 Тест напоминания")]
+        ],
+        resize_keyboard=True
+    )
 
         # Клавиатура для отмены действий
         self.cancel_keyboard = ReplyKeyboardMarkup(
@@ -1065,6 +1298,49 @@ class ReminderBot:
             ]
         )
 
+        # ConversationHandler для массового добавления напоминаний
+        batch_conv_handler = ConversationHandler(
+            entry_points=[
+                CommandHandler('batch', self.start_batch_reminders),
+                MessageHandler(filters.Regex(r'^📝 Добавить несколько$'), self.start_batch_reminders)
+            ],
+            states={
+                SETTING_BATCH_REMINDERS: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.parse_batch_reminders)
+                ],
+                SETTING_BATCH_FREQUENCY: [
+                    CallbackQueryHandler(self.set_batch_frequency)
+                ]
+            },
+            fallbacks=[
+                CommandHandler('cancel', self.cancel_conversation),
+                MessageHandler(filters.Regex(r'^🔙 Отмена$'), self.cancel_conversation)
+            ]
+        )
+
+        # ConversationHandler для редактирования напоминаний
+        edit_conv_handler = ConversationHandler(
+            entry_points=[
+                CommandHandler('edit', self.start_edit_reminder),
+                MessageHandler(filters.Regex(r'^✏️ Редактировать$'), self.start_edit_reminder)
+            ],
+            states={
+                EDITING_REMINDER: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.edit_reminder)
+                ],
+                SETTING_REMINDER_COMMENT: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.update_reminder_comment),
+                    MessageHandler(filters.PHOTO, self.update_reminder_comment),
+                    MessageHandler(filters.Document.ALL, self.update_reminder_comment),
+                    MessageHandler(filters.Regex(r'^Пропустить$'), self.skip_comment)
+                ]
+            },
+            fallbacks=[
+                CommandHandler('cancel', self.cancel_conversation),
+                MessageHandler(filters.Regex(r'^🔙 Отмена$'), self.cancel_conversation)
+            ]
+        )
+
         # Регистрация всех обработчиков
         self.application.add_handler(CommandHandler('start', self.start_command))
         self.application.add_handler(CommandHandler('help', self.help_command))
@@ -1074,11 +1350,13 @@ class ReminderBot:
         self.application.add_handler(CommandHandler('timezone', self.timezone_command))
         self.application.add_handler(CommandHandler('test', self.test_command))
         self.application.add_handler(conv_handler)
+        self.application.add_handler(batch_conv_handler)
+        self.application.add_handler(edit_conv_handler)
         self.application.add_handler(MessageHandler(filters.TEXT, self.handle_main_menu))
         self.application.add_handler(CallbackQueryHandler(self.handle_timezone_selection))
         self.application.add_handler(MessageHandler(filters.Regex(r'^❌ Удалить '), self.delete_reminder))
         self.application.add_error_handler(self.error_handler)
-
+        
 if __name__ == '__main__':
     # Создание и запуск бота
     bot = ReminderBot()
