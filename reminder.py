@@ -3,10 +3,8 @@ import logging
 import asyncio
 import sqlite3
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Union
 import pytz
-import telegram
-from dotenv import load_dotenv
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -16,7 +14,6 @@ from telegram import (
     PhotoSize,
     Document
 )
-from telegram import Bot
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,6 +26,7 @@ from telegram.ext import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from dotenv import load_dotenv
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Состояния диалога
+# Состояния диалога для ConversationHandler
 (
     SETTING_REMINDER_TEXT,
     SETTING_REMINDER_TIME,
@@ -47,73 +45,31 @@ logger = logging.getLogger(__name__)
 
 # Часовой пояс по умолчанию
 DEFAULT_TIMEZONE = 'Europe/Moscow'
-load_dotenv(".env")
 
-
-# Инициализация базы данных
-def initialize_database():
-    """Создает таблицы в базе данных, если они не существуют"""
-    connection = sqlite3.connect('reminders.db')
-    cursor = connection.cursor()
-
-    # Таблица для хранения напоминаний
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS reminders (
-        user_id INTEGER NOT NULL,
-        job_id TEXT PRIMARY KEY,
-        reminder_text TEXT NOT NULL,
-        reminder_time TEXT NOT NULL,
-        frequency TEXT NOT NULL,
-        frequency_text TEXT NOT NULL,
-        comment_type TEXT,
-        comment_text TEXT,
-        comment_file_id TEXT,
-        comment_file_name TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-
-    # Таблица для хранения часовых поясов пользователей
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS user_timezones (
-        user_id INTEGER PRIMARY KEY,
-        timezone TEXT NOT NULL,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-
-    connection.commit()
-    connection.close()
-
-
-initialize_database()
+# Загрузка переменных окружения
+load_dotenv()
 
 
 class ReminderBot:
     def __init__(self):
-        """Инициализация бота"""
-
-        if not os.path.exists('reminders.db'):
-            open('reminders.db', 'w').close()
-
-        self.application: Optional[Application] = None
+        """Инициализация бота с настройкой всех компонентов"""
+        # Блокировка для безопасной работы с планировщиком
+        self._scheduler_lock = asyncio.Lock()
+        
+        # Флаг состояния работы бота
+        self._is_running = False
+        
+        # Основной объект приложения Telegram
+        self.application = None
+        
+        # Планировщик напоминаний
         self.scheduler = AsyncIOScheduler(timezone=pytz.timezone(DEFAULT_TIMEZONE))
-
-        # Основное меню
-        self.main_menu_keyboard = ReplyKeyboardMarkup(
-            [
-                [KeyboardButton("➕ Добавить напоминание")],
-                [KeyboardButton("📋 Список напоминаний"), KeyboardButton("❌ Удалить напоминание")],
-                [KeyboardButton("🌍 Изменить часовой пояс"), KeyboardButton("🔄 Тест напоминания")]
-            ],
-            resize_keyboard=True
-        )
-
-        # Клавиатура для отмены
-        self.cancel_keyboard = ReplyKeyboardMarkup(
-            [[KeyboardButton("🔙 Отмена")]],
-            resize_keyboard=True
-        )
+        
+        # Инициализация клавиатур
+        self._initialize_keyboards()
+        
+        # Проверка и создание базы данных
+        self._initialize_database()
 
     # Методы работы с базой данных
     async def get_user_timezone(self, user_id: int) -> str:
@@ -232,6 +188,68 @@ class ReminderBot:
             })
 
         return result
+
+    def _initialize_database(self):
+        """Создание и проверка структуры базы данных"""
+        if not os.path.exists('reminders.db'):
+            logger.info("Создание новой базы данных reminders.db")
+            
+        conn = sqlite3.connect('reminders.db')
+        cursor = conn.cursor()
+        
+        # Таблица напоминаний
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS reminders (
+            user_id INTEGER NOT NULL,
+            job_id TEXT PRIMARY KEY,
+            reminder_text TEXT NOT NULL,
+            reminder_time TEXT NOT NULL,
+            frequency TEXT NOT NULL,
+            frequency_text TEXT NOT NULL,
+            comment_type TEXT,
+            comment_text TEXT,
+            comment_file_id TEXT,
+            comment_file_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        # Таблица часовых поясов пользователей
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_timezones (
+            user_id INTEGER PRIMARY KEY,
+            timezone TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        conn.commit()
+        conn.close()
+    
+    def _initialize_keyboards(self):
+        """Инициализация всех клавиатур бота"""
+        # Основное меню
+        self.main_menu_keyboard = ReplyKeyboardMarkup(
+            [
+                [KeyboardButton("➕ Добавить напоминание")],
+                [KeyboardButton("📋 Список напоминаний"), KeyboardButton("❌ Удалить напоминание")],
+                [KeyboardButton("🌍 Изменить часовой пояс"), KeyboardButton("🔄 Тест напоминания")]
+            ],
+            resize_keyboard=True
+        )
+
+        # Клавиатура для отмены действий
+        self.cancel_keyboard = ReplyKeyboardMarkup(
+            [[KeyboardButton("🔙 Отмена")]],
+            resize_keyboard=True
+        )
+
+        # Клавиатура для пропуска комментария
+        self.skip_keyboard = ReplyKeyboardMarkup(
+            [
+                [KeyboardButton("Пропустить")],
+                [KeyboardButton("🔙 Отмена")]
+            ],
+            resize_keyboard=True
+        )
 
     async def load_all_reminders(self):
         """Загрузка с проверкой состояния"""
@@ -770,88 +788,184 @@ class ReminderBot:
             # Экстренный выход для системных демонов (supervisor/systemd)
             os._exit(1)
 
-    async def run(self):
-        """Новая версия с правильной инициализацией"""
+    async def _load_reminders_from_database(self):
+        """Загрузка всех напоминаний из базы данных"""
+        logger.info("Загрузка напоминаний из базы данных...")
+        
         try:
-            # 1. Инициализация приложения
+            conn = sqlite3.connect('reminders.db')
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM reminders')
+            reminders = cursor.fetchall()
+            
+            loaded_count = 0
+            
+            for reminder in reminders:
+                try:
+                    user_id = reminder[0]
+                    job_id = reminder[1]
+                    text = reminder[2]
+                    time_str = reminder[3]
+                    frequency = reminder[4]
+                    freq_text = reminder[5]
+                    comment_type = reminder[6]
+                    comment_text = reminder[7]
+                    comment_file_id = reminder[8]
+                    comment_file_name = reminder[9]
+                    
+                    # Восстановление объекта комментария
+                    comment = None
+                    if comment_type:
+                        comment = {
+                            'type': comment_type,
+                            'content': comment_text,
+                            'file_id': comment_file_id,
+                            'file_name': comment_file_name
+                        }
+                    
+                    # Создание триггера для напоминания
+                    hour, minute = map(int, time_str.split(':'))
+                    timezone = pytz.timezone(await self.get_user_timezone(user_id))
+                    
+                    if frequency == 'once':
+                        # Одноразовое напоминание
+                        now = datetime.now(timezone)
+                        reminder_time = timezone.localize(datetime.combine(now.date(), time(hour, minute)))
+                        if reminder_time < now:
+                            reminder_time += timedelta(days=1)
+                        trigger = DateTrigger(reminder_time)
+                    else:
+                        # Повторяющееся напоминание
+                        frequency_map = {
+                            'daily': '*',
+                            'weekly': 'sun-sat',
+                            'weekdays': 'mon-fri',
+                            'mon_wed_fri': 'mon,wed,fri',
+                            'tue_thu': 'tue,thu'
+                        }
+                        trigger = CronTrigger(
+                            hour=hour,
+                            minute=minute,
+                            day_of_week=frequency_map[frequency],
+                            timezone=timezone
+                        )
+                    
+                    # Добавление задачи в планировщик
+                    if not self.scheduler.get_job(job_id):
+                        self.scheduler.add_job(
+                            self.send_reminder,
+                            trigger=trigger,
+                            args=[user_id, job_id],
+                            id=job_id,
+                            replace_existing=True,
+                            misfire_grace_time=300
+                        )
+                        loaded_count += 1
+                        
+                except Exception as e:
+                    logger.error(f"Ошибка загрузки напоминания {job_id}: {e}")
+            
+            logger.info(f"Успешно загружено {loaded_count} напоминаний")
+            
+        except Exception as e:
+            logger.error(f"Ошибка работы с базой данных: {e}")
+        finally:
+            conn.close()
+
+
+    async def run(self):
+        """Основной метод запуска бота"""
+        if self._is_running:
+            raise RuntimeError("Бот уже запущен!")
+            
+        self._is_running = True
+        
+        try:
+            # Инициализация приложения Telegram
             self.application = Application.builder() \
                 .token(os.getenv("TELEGRAM_BOT_TOKEN")) \
-                .post_init(self._post_init) \
                 .build()
-            
-            # 2. Загрузка напоминаний ДО старта планировщика
-            await self.load_all_reminders()
-            
-            # 3. Явный старт планировщика
-            self.scheduler.start(paused=False)
-            logger.info(f"Scheduler started with {len(self.scheduler.get_jobs())} jobs")
-            
-            # 4. Запуск бота
+
+            # Загрузка напоминаний из базы данных
+            await self._load_reminders_from_database()
+
+            # Настройка всех обработчиков команд
+            self._setup_handlers()
+
+            # Запуск планировщика
+            async with self._scheduler_lock:
+                if not self.scheduler.running:
+                    self.scheduler.start()
+                    logger.info("Планировщик напоминаний запущен")
+
+            # Инициализация и запуск бота
             await self.application.initialize()
             await self.application.start()
-            await self.application.updater.start_polling(drop_pending_updates=True)
             
-            # 5. Вечный цикл с обработкой остановки
-            while True:
-                await asyncio.sleep(10)
+            # Запуск long-polling
+            await self.application.updater.start_polling(
+                drop_pending_updates=True,
+                timeout=20,
+                connect_timeout=10
+            )
+            
+            logger.info("Бот успешно запущен и готов к работе")
+            
+            # Основной цикл работы
+            while self._is_running:
+                await asyncio.sleep(5)
+                
+                # Периодическая проверка состояния планировщика
                 if not self.scheduler.running:
-                    logger.error("Scheduler stopped unexpectedly!")
-                    self.scheduler.start(paused=False)
-                    
+                    logger.warning("Планировщик остановлен, перезапуск...")
+                    try:
+                        async with self._scheduler_lock:
+                            self.scheduler.start()
+                    except Exception as e:
+                        logger.error(f"Ошибка перезапуска планировщика: {e}")
+
         except Exception as e:
-            logger.critical(f"Fatal error: {str(e)}", exc_info=True)
+            logger.critical(f"Критическая ошибка: {e}", exc_info=True)
         finally:
-            await self.shutdown()
+            await self._safe_shutdown()
 
-    async def _post_init(self, app: Application):
-        """Дополнительная инициализация после запуска"""
-        logger.info("Bot post-init checks")
-        if not self.scheduler.running:
-            self.scheduler.start(paused=False)
+    
 
-    async def _kill_previous_sessions(self):
-        """Принудительно закрывает все предыдущие соединения"""
+    async def _safe_shutdown(self):
+        """Безопасное выключение бота"""
+        logger.info("Starting safe shutdown...")
+        self._is_running = False
         
-        temp_bot = Bot(os.getenv("TELEGRAM_BOT_TOKEN"))
-        try:
-            await temp_bot.close()
-            await temp_bot.delete_webhook(drop_pending_updates=True)
-        except Exception as e:
-            logger.warning(f"Очистка сессий: {e}")
-        finally:
-            await temp_bot.shutdown()
-
-    async def shutdown(self):
-        logger.info("Остановка бота...")
-        
-        if hasattr(self, 'scheduler') and self.scheduler.running:
-            self.scheduler.shutdown()
-        
-        if hasattr(self, 'application'):
+        # Остановка приложения
+        if self.application:
             try:
                 if self.application.running:
                     await self.application.stop()
                     await self.application.shutdown()
             except Exception as e:
-                logger.error(f"Ошибка при остановке: {e}")
-        
-        if hasattr(self, 'scheduler') and self.scheduler.running:
-            self.scheduler.shutdown()
+                logger.error(f"Application shutdown error: {e}")
 
-        logger.info("Бот успешно остановлен")
+        # Остановка планировщика
+        async with self._scheduler_lock:
+            if hasattr(self, 'scheduler'):
+                try:
+                    if self.scheduler.running:
+                        self.scheduler.shutdown(wait=False)
+                except Exception as e:
+                    logger.error(f"Scheduler shutdown error: {e}")
+        
+        logger.info("Shutdown completed")
 
     async def ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды для проверки активности бота"""
         await update.message.reply_text("🟢 Бот активен")
 
-    def setup_handlers(self):
+    def _setup_handlers(self):
         """Настройка всех обработчиков команд и сообщений"""
-        # Создаем ConversationHandler для добавления напоминаний
-        self.application.add_handler(CommandHandler('ping', self.ping))
-
+        # ConversationHandler для создания напоминаний
         conv_handler = ConversationHandler(
             entry_points=[
-                MessageHandler(filters.Regex(r'^➕ Добавить напоминание$'), self.handle_main_menu)
+                MessageHandler(filters.Regex(r'^➕ Добавить напоминание$'), self.start_reminder_creation)
             ],
             states={
                 SETTING_REMINDER_TEXT: [
@@ -867,30 +981,33 @@ class ReminderBot:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_reminder_comment),
                     MessageHandler(filters.PHOTO, self.set_reminder_comment),
                     MessageHandler(filters.Document.ALL, self.set_reminder_comment),
-                    MessageHandler(filters.Regex(r'^Пропустить$'), self.set_reminder_comment)
-                ],
+                    MessageHandler(filters.Regex(r'^Пропустить$'), self.skip_comment)
+                ]
             },
             fallbacks=[
-                MessageHandler(filters.Regex(r'^🔙 Отмена$'), self.set_reminder_comment)
+                CommandHandler('cancel', self.cancel_conversation),
+                MessageHandler(filters.Regex(r'^🔙 Отмена$'), self.cancel_conversation)
             ]
         )
 
-        # Основные обработчики
+        # Регистрация всех обработчиков
         self.application.add_handler(CommandHandler('start', self.start_command))
         self.application.add_handler(conv_handler)
         self.application.add_handler(MessageHandler(filters.TEXT, self.handle_main_menu))
         self.application.add_handler(CallbackQueryHandler(self.handle_timezone_selection))
-
-        # Обработчик для кнопок удаления
-        self.application.add_handler(MessageHandler(
-            filters.Regex(r'^❌ Удалить '),
-            self.delete_reminder
-        ))
+        self.application.add_handler(MessageHandler(filters.Regex(r'^❌ Удалить '), self.delete_reminder))
+        self.application.add_handler(CommandHandler('help', self.help_command))
+        self.application.add_handler(CommandHandler('status', self.status_command))
+        self.application.add_error_handler(self.error_handler)
 
 
 if __name__ == '__main__':
+    # Создание и запуск бота
     bot = ReminderBot()
+    
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
+    except Exception as e:
+        logger.critical(f"Критическая ошибка при запуске: {e}")
