@@ -1035,15 +1035,13 @@ class ReminderBot:
                 try:
                     user_id, job_id, text, time_str, frequency = reminder
                     
-                    # Восстановление объекта комментария не требуется при загрузке
-                    
                     # Создание триггера для напоминания
                     hour, minute = map(int, time_str.split(':'))
                     timezone = pytz.timezone(await self.get_user_timezone(user_id))
                     
                     if frequency == 'once':
                         now = datetime.now(timezone)
-                        reminder_time = timezone.localize(datetime.combine(now.date(), time(hour, minute))
+                        reminder_time = timezone.localize(datetime.combine(now.date(), time(hour, minute)))
                         if reminder_time < now:
                             reminder_time += timedelta(days=1)
                         trigger = DateTrigger(reminder_time)
